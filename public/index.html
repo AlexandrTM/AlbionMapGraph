@@ -5,30 +5,73 @@
     <title>Real-time Map Connections</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
-        rect { stroke: #333; stroke-width: 2px; rx: 10; ry: 10; }
-        line { stroke: #555; stroke-width: 2px; marker-end: url(#arrow); }
-        text { font: 12px sans-serif; pointer-events: none; }
+        rect { stroke: #333; stroke-width: 1px; rx: 10; ry: 10; }
+        line { 
+            stroke: #555; stroke-width: 2px; 
+            /* marker-start: url(#arrow-start);
+            marker-end: url(#arrow-end); */
+        }
+        text { font: 14px sans-serif; pointer-events: none; }
     </style>
 </head>
 <body>
 <svg id="map" width="1000" height="600"></svg>
 <script>
     const svg = d3.select("#map");
+    const container = svg.append("g");
+
+    const zoom = d3.zoom()
+        .scaleExtent([0.2, 4])
+        .on("zoom", (event) => {
+            container.attr("transform", event.transform);
+        });
+
+    const drag = d3.drag()
+        .on("start", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        })
+        .on("drag", (event, d) => {
+            d.fx = event.x;
+            d.fy = event.y;
+            updateLinkPositions();
+        })
+        .on("end", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        });
+
+    svg.call(zoom);
+
     const defs = svg.append("defs");
-    defs.append("marker")
-        .attr("id","arrow")
-        .attr("viewBox","0 -5 10 10")
-        .attr("refX",15)
-        .attr("refY",0)
-        .attr("markerWidth",6)
-        .attr("markerHeight",6)
-        .attr("orient","auto")
-        .append("path")
-        .attr("d","M0,-5L10,0L0,5")
-        .attr("fill","#555");
+    // defs.append("marker")
+    //     .attr("id","arrow-end")
+    //     .attr("viewBox","0 -5 10 10")
+    //     .attr("refX",15)
+    //     .attr("refY",0)
+    //     .attr("markerWidth",6)
+    //     .attr("markerHeight",6)
+    //     .attr("orient","auto")
+    //     .append("path")
+    //     .attr("d","M0,-5L10,0L0,5")
+    //     .attr("fill","#555");
+
+    // defs.append("marker")
+    //     .attr("id","arrow-start")
+    //     .attr("viewBox","0 -5 10 10")
+    //     .attr("refX",0)
+    //     .attr("refY",0)
+    //     .attr("markerWidth",6)
+    //     .attr("markerHeight",6)
+    //     .attr("orient","auto")
+    //     .append("path")
+    //     .attr("d","M10,-5L0,0L10,5")
+    //     .attr("fill","#555");
 
     const width = +svg.attr("width"), height = +svg.attr("height");
-    const nodeSize = { w: 120, h: 40 };
+    const nodeSize = { w: width / 7, h: height / 18  };
     let lastETag = "";
 
     async function updateMap() {
@@ -57,7 +100,7 @@
         const nodes = Object.values(nodesMap);
 
         // Clear previous contents
-        svg.selectAll('*:not(defs)').remove();
+        container.selectAll('*:not(defs)').remove();
 
         // Create simulation
         const simulation = d3.forceSimulation(nodes)
@@ -66,27 +109,40 @@
             .force("center", d3.forceCenter(width / 2, height / 2));
 
         // Draw lines
-        const link = svg.append("g")
+        const link = container.append("g")
             .attr("stroke", "#999")
             .attr("stroke-opacity", 0.6)
             .selectAll("line")
             .data(links)
             .enter().append("line")
             .attr("stroke-width", 2)
-            .attr("marker-end", "url(#arrow)");
+            //.attr("marker-start", "url(#arrow-start)")
+            //.attr("marker-end", "url(#arrow-end)");
 
         // Draw rectangles
-        const node = svg.append("g")
+        const node = container.append("g")
             .selectAll("g")
             .data(nodes)
             .enter().append("g");
+
 
         node.append("rect")
             .attr("width", nodeSize.w)
             .attr("height", nodeSize.h)
             .attr("rx", 10)
             .attr("ry", 10)
-            .attr("fill", d => d.id.startsWith("TNL") ? "#6ab1f7" : "#91e291")
+            .attr("fill", d => {
+                const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8)); // clamp tier to [0, 8]
+                const factor = tier / 8;
+
+                if (d.id.startsWith("TNL")) {
+                    // Ava Roads: interpolate from light blue to dark blue
+                    return interpolateColor([180, 200, 255], [80, 120, 220], factor);
+                } else {
+                    // Overworld: interpolate from light green to dark green
+                    return interpolateColor([209, 255, 209], [50, 140, 80], factor);
+                }
+            })
             .attr("stroke", "#333")
             .attr("stroke-width", 2);
 
@@ -94,17 +150,49 @@
             .attr("x", nodeSize.w / 2)
             .attr("y", nodeSize.h / 2 + 4)
             .attr("text-anchor", "middle")
-            .text(d => d.name);
+            .text(d => `${d.name} T${d.tier ?? 0}`);
 
         // Simulation tick updates positions
-        simulation.on("tick", () => {
-            node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
-            link
-                .attr("x1", d => d.source.x)
-                .attr("y1", d => d.source.y)
-                .attr("x2", d => d.target.x)
-                .attr("y2", d => d.target.y);
-        });
+        for (let i = 0; i < 300; ++i) simulation.tick();
+        simulation.stop();
+
+        node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
+        node.call(drag);
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+    }
+
+    function adjustEdge(source, target) {
+        const sourceCenterX = source.x + nodeSize.w / 2;
+        const sourceCenterY = source.y + nodeSize.h / 2;
+        const targetCenterX = target.x + nodeSize.w / 2;
+        const targetCenterY = target.y + nodeSize.h / 2;
+
+        const dx = targetCenterX - sourceCenterX;
+        const dy = targetCenterY - sourceCenterY;
+
+        const dirX = dx === 0 ? 0 : dx > 0 ? 1 : -1;
+        const dirY = dy === 0 ? 0 : dy > 0 ? 1 : -1;
+
+        const offsetX = (nodeSize.w / 2) * dirX;
+        const offsetY = (nodeSize.h / 2) * dirY;
+
+        return {
+            x1: sourceCenterX - offsetX,
+            y1: sourceCenterY + offsetY,
+            x2: targetCenterX - offsetX,
+            y2: targetCenterY + offsetY
+        };
+    }
+
+    function interpolateColor(fromColor, toColor, factor) {
+        const r = Math.round(fromColor[0] + (toColor[0] - fromColor[0]) * factor);
+        const g = Math.round(fromColor[1] + (toColor[1] - fromColor[1]) * factor);
+        const b = Math.round(fromColor[2] + (toColor[2] - fromColor[2]) * factor);
+        return `rgb(${r}, ${g}, ${b})`;
     }
 
     updateMap();
