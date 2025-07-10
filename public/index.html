@@ -43,17 +43,18 @@
         return positions;
     }
 
+    let playerLocationId = "0000";
     let citiesRotation = 234 / 180 * Math.PI;
     // Example config
     const innerCircle = {
-        center: { x: 0, y: 4000 },
+        center: { x: 0, y: 6000 },
         radius: 1700,
         rotation: citiesRotation,
         ids: ["0000", "4000", "1000", "2000", "3004"]
     };
 
     const outerCircle = {
-        center: { x: 0, y: -4000 },
+        center: { x: 0, y: -2000 },
         radius: 3500,
         rotation: citiesRotation,
         ids: ["0301", "4301", "1301", "2301", "3301"]
@@ -81,7 +82,15 @@
     const svg = d3.select("#map");
     const container = svg.append("g");
 
-    let simulation;
+    let nodes = [];
+    let links = [];
+    const nodesMap = new Map(); // id => node
+    const linksSet = new Set(); // `${source}->${target}`
+    let simulation = null;
+    const linkLayer = container.append("g").attr("class", "links");
+    const nodeLayer = container.append("g").attr("class", "nodes");
+    const playerLayer = container.append("g").attr("class", "player-layer");
+
     const zoom = d3.zoom()
         .scaleExtent([0.02, 4])
         .on("zoom", (event) => {
@@ -136,6 +145,7 @@
     const height = window.innerHeight;
     
     const nodeSize = { w: width / 5.5, h: height / 18  };
+    //const nodeSize = { w: width / 5.5, h: height / 18  };
     let lastETag = "";
 
     async function updateMap() {
@@ -150,121 +160,222 @@
 
         lastETag = res.headers.get('ETag');
         const data = await res.json();
-        renderGraph(data);
+        addNewConnections(data);
     }
 
-    async function renderGraph(data){
-        const links = data.map(c => ({ source: c.from.id, target: c.to.id }));
+    function addNewConnections(data) {
+        let addedNodes = false;
+        let addedLinks = false;
 
-        const nodesMap = {};
-        data.forEach(c => {
-            nodesMap[c.from.id] = c.from;
-            nodesMap[c.to.id] = c.to;
-        });
-        const nodes = Object.values(nodesMap).map(node => {
-            if (fixedPositions[node.id]) {
-                node.fx = fixedPositions[node.id].x;
-                node.fy = fixedPositions[node.id].y;
+        for (const conn of data) {
+            const { from, to } = conn;
+            const sourceId = from.id;
+            const targetId = to.id;
+            const key1 = `${sourceId}->${targetId}`;
+            const key2 = `${targetId}->${sourceId}`;
+
+            // Add nodes if new
+            if (!nodesMap.has(sourceId)) {
+                if (fixedPositions[sourceId]) {
+                    from.fx = fixedPositions[sourceId].x;
+                    from.fy = fixedPositions[sourceId].y;
+                }
+                nodesMap.set(sourceId, from);
+                nodes.push(from);
+                addedNodes = true;
+            }
+            if (!nodesMap.has(targetId)) {   
+                if (fixedPositions[targetId]) {
+                    to.fx = fixedPositions[targetId].x;
+                    to.fy = fixedPositions[targetId].y;
+                }
+                nodesMap.set(targetId, to);
+                nodes.push(to);
+                addedNodes = true;
             }
 
-            if (node.id.startsWith("TNL")) {
-                node.type = "TNL";
-            } else if (node.name.startsWith("Smug")) {
-                node.type = "Smug";
-            } else if (node.id.startsWith("DNG")) {
-                node.type = "DNG";
-            } else if (node.id.startsWith("PSG")) {
-                node.type = "PSG";
-            } else {
-                node.type = "Overworld";
-            }
+            // Add link if new
+            if (!linksSet.has(key1) && !linksSet.has(key2)) {
+                linksSet.add(key1);
+                const sourceNode = nodesMap.get(sourceId);
+                const targetNode = nodesMap.get(targetId);
 
-            return node;
-        });
+                if (!sourceNode || !targetNode) continue;
+
+                links.push({ source: sourceNode, target: targetNode });
+                addedLinks = true;
+            }
+        }
+
+        console.log("Map updated", { nodesCount: nodes.length, linksCount: links.length });
+        if (addedNodes || addedLinks) {
+            prepareSimulationAttributes(nodes, links);
+            updateGraph(); // updates visuals
+        }
+    }
+
+    async function updateGraph(){
+        if (!simulation) {
+            simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links)
+                    .id(d => d.id)
+                    .distance(d => d.distance)
+                    .strength(d => d.strength))
+                .force("charge", d3.forceManyBody()
+                    .strength(d => d.chargeStrength))
+                .force("collision", d3.forceCollide()
+                    .radius(d => d.collisionRadius)
+                    .strength(0.5))
+                .on("tick", ticked);
+        } else {
+            simulation.nodes(nodes);
+            simulation.force("link").links(links);
+            simulation.alpha(1).restart();
+        }
 
         // Clear previous contents
-        container.selectAll('*:not(defs)').remove();
+        const linkSel = linkLayer.selectAll("line")
+            .data(links, d => `${d.source}->${d.target}`);
+        const nodeSel = nodeLayer.selectAll("g.node")
+            .data(nodes, d => d.id);
 
-        // Create simulation
-        simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(50).strength(1.7))
-            .force("charge", d3.forceManyBody().strength(-200))
-            //.force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collision", d3.forceCollide()
-                .radius(d => Math.max(nodeSize.w, nodeSize.h) / 2 + 50)  // Add padding
-                .strength(0.4));
-
-        // Draw lines
-        const link = container.append("g")
-            .attr("stroke", "#999")
-            .attr("stroke-opacity", 0.6)
-            .selectAll("line")
-            .data(links)
-            .enter().append("line")
-            .attr("stroke-width", 2)
-            //.attr("marker-start", "url(#arrow-start)")
-            //.attr("marker-end", "url(#arrow-end)");
-
-        // Draw rectangles
-        const node = container.append("g")
-            .selectAll("g")
-            .data(nodes)
-            .enter().append("g");
+        linkSel.join(
+            enter => enter.append("line")
+                .attr("stroke", "#999")
+                .attr("stroke-opacity", 0.6)
+                .attr("stroke-width", 2),
+            update => update,
+            exit => exit.remove()
+        );
 
 
-        node.append("rect")
+        const nodeEnter = nodeSel.enter().append("g")
+            .attr("class", "node")
+            .call(drag);
+
+        nodeEnter.append("rect")
             .attr("width", nodeSize.w)
             .attr("height", nodeSize.h)
             .attr("rx", 10)
             .attr("ry", 10)
             .attr("fill", d => {
-                const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8)); // clamp tier to [0, 8]
+                const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8));
                 const factor = tier / 8;
-
                 switch (d.type) {
-                    case "TNL": // Ava Roads
-                        return interpolateColor([180, 200, 255], [80, 120, 220], factor);
-                    case "Smug":
-                        return interpolateColor([204, 204, 204], [153, 153, 153], factor);
-                    case "DNG":
-                        return interpolateColor([166, 166, 166], [117, 117, 117], factor);
-                    case "PSG":
-                        return interpolateColor([175, 175, 200], [175, 175, 200], factor);
-                    default: // Overworld
-                        return interpolateColor([209, 255, 209], [50, 140, 80], factor);
+                    case "TNL": return interpolateColor([180, 200, 255], [80, 120, 220], factor);
+                    case "Smug": return interpolateColor([204, 204, 204], [153, 153, 153], factor);
+                    case "DNG": return interpolateColor([166, 166, 166], [117, 117, 117], factor);
+                    case "PSG": return interpolateColor([175, 175, 200], [175, 175, 200], factor);
+                    default: return interpolateColor([209, 255, 209], [50, 140, 80], factor);
                 }
             })
-            .attr("stroke", d => (d.tier === 8 ? "#bb2222" : "#333"))
-            .attr("stroke-width", d => (d.tier === 8 ? 2 : 1));
+            .attr("stroke", d => d.tier === 8 ? "#bb2222" : "#333")
+            .attr("stroke-width", d => d.tier === 8 ? 2 : 1);
 
-        node.append("text")
+        nodeEnter.append("text")
             .attr("x", nodeSize.w / 2)
             .attr("y", nodeSize.h / 2 + 4)
             .attr("text-anchor", "middle")
             .text(d => `${d.name} T${d.tier ?? 0}`);
+            
+        playerLayer.selectAll("circle.player-marker").remove();
+
+        const playerNode = nodesMap.get(playerLocationId);
+        if (playerNode) {
+            playerLayer.append("circle")
+                .attr("class", "player-marker")
+                .attr("r", nodeSize.h)
+                .attr("fill", "#ff3333")
+                .attr("stroke", "#fff")
+                .attr("stroke-width", 2)
+                .attr("pointer-events", "none") // Don't interfere with mouse
+                .attr("cx", playerNode.x)
+                .attr("cy", playerNode.y); // Above the node
+        }
 
 
-        // for (let i = 0; i < 500; ++i) simulation.tick();
-        // simulation.stop();
-        simulation.on("tick", () => {  
-            applyFixedAttraction(nodes);
+        nodeSel.exit().remove();
+    }
 
-            node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
-                link
-                    .attr("x1", d => d.source.x)
-                    .attr("y1", d => d.source.y)
-                    .attr("x2", d => d.target.x)
-                    .attr("y2", d => d.target.y);
-        });
+    function ticked() {
+        nodeLayer.selectAll("g.node")
+            .attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
 
-        node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
-        node.call(drag);
-        // Simulation tick updates positions
-        // link
-        //     .attr("x1", d => d.source.x)
-        //     .attr("y1", d => d.source.y)
-        //     .attr("x2", d => d.target.x)
-        //     .attr("y2", d => d.target.y);
+        linkLayer.selectAll("line")
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+            // Move player marker
+        const playerNode = nodesMap.get(playerLocationId);
+        if (playerNode) {
+            container.select("circle.player-marker")
+                .attr("cx", playerNode.x)
+                .attr("cy", playerNode.y - nodeSize.h * 1.8);
+        }
+    }
+
+    function prepareSimulationAttributes(nodes, links) {
+        for (const node of nodes) {
+            // Determine node type
+            if (node.id.startsWith("TNL")) node.type = "TNL";
+            else if (node.id.startsWith("DNG")) node.type = "DNG";
+            else if (node.name.startsWith("Smug")) node.type = "Smug";
+            else if (node.id.startsWith("PSG")) node.type = "PSG"; // Example
+            else node.type = "OVERWORLD";
+
+            // Precomputed simulation values
+            node.chargeStrength = {
+                TNL: -150,
+                DNG: -50,
+                Smug: -100,
+                PSG: -50,
+                OVERWORLD: -500
+            }[node.type];
+
+            const halfMaxSize = Math.max(nodeSize.w, nodeSize.h) / 2;
+            node.collisionRadius = {
+                TNL: halfMaxSize * 1.15,
+                DNG: halfMaxSize * 1,
+                Smug: halfMaxSize * 1,
+                PSG: halfMaxSize * 1,
+                OVERWORLD: halfMaxSize * 1.1 + node.tier / 10
+            }[node.type];
+
+            node.collisionStrength = {
+                TNL: 1,
+                DNG: 1,
+                Smug: 1,
+                PSG: 1,
+                OVERWORLD: 1
+            }[node.type];
+        }
+
+        for (const link of links) {
+            const sourceType = nodes.find(n => n.id === link.source.id).type;
+            const targetType = nodes.find(n => n.id === link.target.id).type;
+
+            const typeCombo = [sourceType, targetType].sort().join("-");
+
+            link.distance = {
+                "DNG-DNG": 0,
+                "DNG-OVERWORLD": 0,
+                "TNL-TNL": 50,
+                "TNL-OVERWORLD": 100,
+                "PSG-OVERWORLD": 0,
+                "OVERWORLD-OVERWORLD": 0
+            }[typeCombo] || 50;
+
+            link.strength = {
+                "DNG-DNG": 1.8,
+                "DNG-OVERWORLD": 0.5,
+                "TNL-TNL": 1.0,
+                "TNL-OVERWORLD": 0.5,
+                "PSG-OVERWORLD": 1,
+                "OVERWORLD-OVERWORLD": 2
+            }[typeCombo] || 1.0;
+        }
     }
 
     function applyFixedAttraction(nodes) {

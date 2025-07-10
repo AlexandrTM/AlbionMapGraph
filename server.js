@@ -7,8 +7,15 @@ const app = express();
 const PLAYER_PATH = path.join("O:", "repos", "AlbionPacketAnalyze", "packetAnalyze", "player_path.json");
 let connections = [];
 
-function hashData(data) {
-    return crypto.createHash('sha1').update(JSON.stringify(data)).digest('hex');
+function hashConnection({ from, to, type }) {
+    // Only include the relevant parts (sorted to avoid order-based mismatches)
+    const key = `${type}:${from.id}->${to.id}`;
+    return key;
+}
+
+function hashData(connections) {
+    const keys = connections.map(hashConnection).sort(); // Ensure order consistency
+    return crypto.createHash('sha1').update(keys.join(',')).digest('hex');
 }
 
 connections = [];
@@ -44,8 +51,12 @@ function reloadConnections() {
     }
 }
 
+let debounceTimer = null;
 fs.watch(PLAYER_PATH, (event, name) => {
-    if (event === 'change') reloadConnections();
+    if (event === 'change') {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => reloadConnections(), 100);
+    }
 });
 
 reloadConnections();
