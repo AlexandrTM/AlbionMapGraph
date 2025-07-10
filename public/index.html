@@ -5,23 +5,85 @@
     <title>Real-time Map Connections</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
-        rect { stroke: #333; stroke-width: 1px; rx: 10; ry: 10; }
+        rect { rx: 10; ry: 10; }
         line { 
             stroke: #555; stroke-width: 2px; 
             /* marker-start: url(#arrow-start);
             marker-end: url(#arrow-end); */
         }
         text { font: 14px sans-serif; pointer-events: none; }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        svg#map {
+            width: 100%;
+            height: 100%;
+            display: block;
+            background-color: #ddd;
+        }
     </style>
 </head>
 <body>
-<svg id="map" width="1000" height="600"></svg>
+<svg id="map"></svg>
 <script>
+    function generateCirclePositions(ids, center, radius, rotation = 0) {
+        const angleStep = (2 * Math.PI) / ids.length;
+        const positions = {};
+        ids.forEach((id, i) => {
+            const angle = i * angleStep + rotation;
+            const x = center.x + radius * Math.cos(angle);
+            const y = center.y + radius * Math.sin(angle);
+            positions[id] = { x, y };
+        });
+        return positions;
+    }
+
+    let citiesRotation = 234 / 180 * Math.PI;
+    // Example config
+    const innerCircle = {
+        center: { x: 0, y: 4000 },
+        radius: 1700,
+        rotation: citiesRotation,
+        ids: ["0000", "4000", "1000", "2000", "3004"]
+    };
+
+    const outerCircle = {
+        center: { x: 0, y: -4000 },
+        radius: 3500,
+        rotation: citiesRotation,
+        ids: ["0301", "4301", "1301", "2301", "3301"]
+    };
+
+    // Merge all fixed positions
+    const fixedPositions = {
+        ...generateCirclePositions(
+            innerCircle.ids, 
+            innerCircle.center, 
+            innerCircle.radius, 
+            innerCircle.rotation
+        ),
+        ...generateCirclePositions(
+            outerCircle.ids, 
+            outerCircle.center, 
+            outerCircle.radius, 
+            innerCircle.rotation
+        ),
+        "3003": { x: innerCircle.center.x, y: innerCircle.center.y },
+        "5000": { x: outerCircle.center.x - 7000, y: outerCircle.center.y },
+        "1011": { x: innerCircle.center.x - 7000, y: innerCircle.center.y },
+    };
+
     const svg = d3.select("#map");
     const container = svg.append("g");
 
+    let simulation;
     const zoom = d3.zoom()
-        .scaleExtent([0.2, 4])
+        .scaleExtent([0.02, 4])
         .on("zoom", (event) => {
             container.attr("transform", event.transform);
         });
@@ -70,8 +132,10 @@
     //     .attr("d","M10,-5L0,0L10,5")
     //     .attr("fill","#555");
 
-    const width = +svg.attr("width"), height = +svg.attr("height");
-    const nodeSize = { w: width / 7, h: height / 18  };
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    
+    const nodeSize = { w: width / 5.5, h: height / 18  };
     let lastETag = "";
 
     async function updateMap() {
@@ -97,16 +161,38 @@
             nodesMap[c.from.id] = c.from;
             nodesMap[c.to.id] = c.to;
         });
-        const nodes = Object.values(nodesMap);
+        const nodes = Object.values(nodesMap).map(node => {
+            if (fixedPositions[node.id]) {
+                node.fx = fixedPositions[node.id].x;
+                node.fy = fixedPositions[node.id].y;
+            }
+
+            if (node.id.startsWith("TNL")) {
+                node.type = "TNL";
+            } else if (node.name.startsWith("Smug")) {
+                node.type = "Smug";
+            } else if (node.id.startsWith("DNG")) {
+                node.type = "DNG";
+            } else if (node.id.startsWith("PSG")) {
+                node.type = "PSG";
+            } else {
+                node.type = "Overworld";
+            }
+
+            return node;
+        });
 
         // Clear previous contents
         container.selectAll('*:not(defs)').remove();
 
         // Create simulation
-        const simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(160))
-            .force("charge", d3.forceManyBody().strength(-400))
-            .force("center", d3.forceCenter(width / 2, height / 2));
+        simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink(links).id(d => d.id).distance(50).strength(1.7))
+            .force("charge", d3.forceManyBody().strength(-200))
+            //.force("center", d3.forceCenter(width / 2, height / 2))
+            .force("collision", d3.forceCollide()
+                .radius(d => Math.max(nodeSize.w, nodeSize.h) / 2 + 50)  // Add padding
+                .strength(0.4));
 
         // Draw lines
         const link = container.append("g")
@@ -135,16 +221,21 @@
                 const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8)); // clamp tier to [0, 8]
                 const factor = tier / 8;
 
-                if (d.id.startsWith("TNL")) {
-                    // Ava Roads: interpolate from light blue to dark blue
-                    return interpolateColor([180, 200, 255], [80, 120, 220], factor);
-                } else {
-                    // Overworld: interpolate from light green to dark green
-                    return interpolateColor([209, 255, 209], [50, 140, 80], factor);
+                switch (d.type) {
+                    case "TNL": // Ava Roads
+                        return interpolateColor([180, 200, 255], [80, 120, 220], factor);
+                    case "Smug":
+                        return interpolateColor([204, 204, 204], [153, 153, 153], factor);
+                    case "DNG":
+                        return interpolateColor([166, 166, 166], [117, 117, 117], factor);
+                    case "PSG":
+                        return interpolateColor([175, 175, 200], [175, 175, 200], factor);
+                    default: // Overworld
+                        return interpolateColor([209, 255, 209], [50, 140, 80], factor);
                 }
             })
-            .attr("stroke", "#333")
-            .attr("stroke-width", 2);
+            .attr("stroke", d => (d.tier === 8 ? "#bb2222" : "#333"))
+            .attr("stroke-width", d => (d.tier === 8 ? 2 : 1));
 
         node.append("text")
             .attr("x", nodeSize.w / 2)
@@ -152,17 +243,39 @@
             .attr("text-anchor", "middle")
             .text(d => `${d.name} T${d.tier ?? 0}`);
 
-        // Simulation tick updates positions
-        for (let i = 0; i < 300; ++i) simulation.tick();
-        simulation.stop();
+
+        // for (let i = 0; i < 500; ++i) simulation.tick();
+        // simulation.stop();
+        simulation.on("tick", () => {  
+            applyFixedAttraction(nodes);
+
+            node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+        });
 
         node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
         node.call(drag);
-        link
-            .attr("x1", d => d.source.x)
-            .attr("y1", d => d.source.y)
-            .attr("x2", d => d.target.x)
-            .attr("y2", d => d.target.y);
+        // Simulation tick updates positions
+        // link
+        //     .attr("x1", d => d.source.x)
+        //     .attr("y1", d => d.source.y)
+        //     .attr("x2", d => d.target.x)
+        //     .attr("y2", d => d.target.y);
+    }
+
+    function applyFixedAttraction(nodes) {
+        const strength = 0.03;
+        nodes.forEach(d => {
+            const target = fixedPositions[d.id];
+            if (target) {
+                d.vx += (target.x - d.x) * strength;
+                d.vy += (target.y - d.y) * strength;
+            }
+        });
     }
 
     function adjustEdge(source, target) {
@@ -196,7 +309,7 @@
     }
 
     updateMap();
-    setInterval(updateMap, 2000); // refresh every 2 seconds
+    setInterval(updateMap, 3000); // refresh every 2 seconds
 </script>
 </body>
 </html>
