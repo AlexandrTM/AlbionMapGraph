@@ -11,7 +11,7 @@
             /* marker-start: url(#arrow-start);
             marker-end: url(#arrow-end); */
         }
-        text { font: 14px sans-serif; pointer-events: none; }
+        text { font: 14px sans-serif; color: #000; pointer-events: none; }
 
         html, body {
             margin: 0;
@@ -29,6 +29,17 @@
     </style>
 </head>
 <body>
+<button id="recenterButton" style="position:absolute; top:100px; left:10px; z-index:10;">
+    Re-center to Player
+</button>
+<div style="position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(255,255,255,0.9); padding: 10px; border-radius: 8px;">
+    <label>From: <input id="fromInput" list="locationList" /></label><br>
+    <label>To: <input id="toInput" list="locationList" /></label><br>
+    <datalist id="locationList"></datalist>
+    <button onclick="addConnectionFromUI()">➕ Add Connection</button>
+    <button onclick="removeConnectionFromUI()">➖ Remove Connection</button>
+  </div>
+  
 <svg id="map"></svg>
 <script>
     function generateCirclePositions(ids, center, radius, rotation = 0) {
@@ -43,17 +54,18 @@
         return positions;
     }
 
+    let playerLocationId = null;
     let citiesRotation = 234 / 180 * Math.PI;
     // Example config
     const innerCircle = {
-        center: { x: 0, y: 4000 },
-        radius: 1700,
+        center: { x: 0, y: 6000 },
+        radius: 1750,
         rotation: citiesRotation,
         ids: ["0000", "4000", "1000", "2000", "3004"]
     };
 
     const outerCircle = {
-        center: { x: 0, y: -4000 },
+        center: { x: 0, y: -2000 },
         radius: 3500,
         rotation: citiesRotation,
         ids: ["0301", "4301", "1301", "2301", "3301"]
@@ -81,7 +93,15 @@
     const svg = d3.select("#map");
     const container = svg.append("g");
 
-    let simulation;
+    let nodes = [];
+    let links = [];
+    const nodesMap = new Map(); // id => node
+    const linksSet = new Set(); // `${source}->${target}`
+    let simulation = null;
+    const linkLayer = container.append("g").attr("class", "links");
+    const nodeLayer = container.append("g").attr("class", "nodes");
+    const playerLayer = container.append("g").attr("class", "player-layer");
+
     const zoom = d3.zoom()
         .scaleExtent([0.02, 4])
         .on("zoom", (event) => {
@@ -135,10 +155,11 @@
     const width = window.innerWidth;
     const height = window.innerHeight;
     
-    const nodeSize = { w: width / 5.5, h: height / 18  };
     let lastETag = "";
 
     async function updateMap() {
+        await updatePlayerData();
+
         const res = await fetch('/map.json', {
             headers: lastETag ? { 'If-None-Match': lastETag } : {}
         });
@@ -149,124 +170,423 @@
         }
 
         lastETag = res.headers.get('ETag');
-        const data = await res.json();
-        renderGraph(data);
+        const rawData = await res.json();
+        console.log("Fetched JSON:", rawData);
+
+        const connList = rawData.connections ?? [];
+        const locMap = rawData.locations ?? {};
+
+        const datalist = document.getElementById('locationList');
+        datalist.innerHTML = ""; // clear previous entries
+
+        window.locationIdNameMap = new Map();
+        for (const loc of locMap) {
+            const label = `${loc.name} [${loc.id}]`;
+            window.locationIdNameMap.set(label, loc.id);
+
+            const option = document.createElement("option");
+            option.value = label;
+            datalist.appendChild(option);
+        }
+
+        addNewConnections(connList, locMap);
     }
 
-    async function renderGraph(data){
-        const links = data.map(c => ({ source: c.from.id, target: c.to.id }));
+    function renderPlayerMarker() {
+        playerLayer.selectAll("circle.player-marker").remove();
 
-        const nodesMap = {};
-        data.forEach(c => {
-            nodesMap[c.from.id] = c.from;
-            nodesMap[c.to.id] = c.to;
+        const playerNode = nodesMap.get(playerLocationId);
+        if (!playerNode) return;
+
+        const circleRadius = width * 0.035;
+        playerLayer.append("circle")
+            .attr("class", "player-marker")
+            .attr("r", circleRadius)
+            .attr("fill", "#ff3333")
+            .attr("stroke", "#fff")
+            .attr("stroke-width", 2)
+            .attr("pointer-events", "none")
+            .attr("cx", playerNode.x)
+            .attr("cy", playerNode.y - playerNode.height / 2 - circleRadius * 1.45); // placed above
+    }
+    async function updatePlayerData() {
+        try {
+            const res = await fetch('/player.json');
+            const data = await res.json();
+            if (data.id && data.id !== playerLocationId) {
+                playerLocationId = data.id;
+
+                // Autofill "From" input with player's location if empty
+                updateFromInput();
+            }
+        } catch (e) {
+            console.warn("Failed to fetch player location:", e);
+        }
+    }
+    function updateFromInput() {
+        const fromInput = document.getElementById("fromInput");
+        if (playerLocationId) {
+            for (const [label, id] of window.locationIdNameMap.entries()) {
+                if (id === playerLocationId) {
+                    fromInput.value = label;
+                    break;
+                }
+            }
+        }
+    }
+    function animatePlayerMarker() {
+        renderPlayerMarker(); // Always redraw player marker
+        requestAnimationFrame(animatePlayerMarker); // Loop forever
+    }
+    document.getElementById("recenterButton").addEventListener("click", () => {
+        const playerNode = nodesMap.get(playerLocationId);
+        if (!playerNode) return;
+
+        const scale = d3.zoomTransform(svg.node()).k; // current zoom level
+        const translateX = width / 2 - playerNode.x * scale;
+        const translateY = height / 2 - playerNode.y * scale;
+
+        svg.transition()
+            .duration(400)
+            .call(
+                zoom.transform,
+                d3.zoomIdentity.translate(translateX, translateY).scale(0.45)
+            );
+    });
+    function getSelectedLocationId(inputId) {
+        const val = document.getElementById(inputId).value;
+        return window.locationIdNameMap.get(val);
+    }
+    // function addConnectionFromUI() {
+    //     const fromId = getSelectedLocationId("fromInput");
+    //     const toId = getSelectedLocationId("toInput");
+
+    //     if ((!fromId || !toId) || (fromId === toId)) {
+    //         alert("Please select valid locations from the list.");
+    //         return;
+    //     }
+
+    //     addConnection(fromId, toId); // reuse your earlier logic
+    // }
+    // function removeConnectionFromUI() {
+    //     const fromId = getSelectedLocationId("fromInput");
+    //     const toId = getSelectedLocationId("toInput");
+
+    //     if ((!fromId || !toId) || (fromId === toId)) {
+    //         alert("Please select valid locations from the list.");
+    //         return;
+    //     }
+
+    //     removeConnection(fromId, toId); // reuse your earlier logic
+    // }
+
+    async function addConnectionFromUI() {
+        const ids = getSelectedLocationIds();
+        if (!ids) return;
+
+        const res = await fetch("/api/connection/add", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ from: ids.fromId, to: ids.toId })
         });
-        const nodes = Object.values(nodesMap).map(node => {
-            if (fixedPositions[node.id]) {
-                node.fx = fixedPositions[node.id].x;
-                node.fy = fixedPositions[node.id].y;
+
+        const result = await res.json();
+    }
+    async function removeConnectionFromUI() {
+        const ids = getSelectedLocationIds();
+        if (!ids) return;
+
+        const res = await fetch("/api/connection/remove", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ from: ids.fromId, to: ids.toId })
+        });
+
+        const result = await res.json();
+    }
+    function getSelectedLocationIds() {
+        const fromLabel = document.getElementById("fromInput").value;
+        const toLabel = document.getElementById("toInput").value;
+
+        const fromId = window.locationIdNameMap.get(fromLabel);
+        const toId = window.locationIdNameMap.get(toLabel);
+
+        if ((!fromId || !toId) || fromId === toId) {
+            alert("Invalid locations selected.");
+            return null;
+        }
+
+        return { fromId, toId };
+    }
+
+    function addNewConnections(connectionList, locationMap) {
+        let addedNodes = false;
+        let addedLinks = false;
+
+        for (const conn of connectionList) {
+            const fromId = conn.from.id;
+            const toId = conn.to.id;
+
+            const key1 = `${fromId}->${toId}`;
+            const key2 = `${toId}->${fromId}`;
+
+            // Add nodes
+            if (!nodesMap.has(fromId)) {
+                const loc = locationMap.find(l => l.id === fromId);
+                if (!loc) continue;
+
+                const nodeData = { id: fromId, ...loc };
+                if (fixedPositions[fromId]) {
+                    nodeData.fx = fixedPositions[fromId].x;
+                    nodeData.fy = fixedPositions[fromId].y;
+                }
+                nodesMap.set(fromId, nodeData);
+                nodes.push(nodeData);
+                addedNodes = true;
             }
 
-            if (node.id.startsWith("TNL")) {
-                node.type = "TNL";
-            } else if (node.name.startsWith("Smug")) {
-                node.type = "Smug";
-            } else if (node.id.startsWith("DNG")) {
-                node.type = "DNG";
-            } else if (node.id.startsWith("PSG")) {
-                node.type = "PSG";
-            } else {
-                node.type = "Overworld";
+            if (!nodesMap.has(toId)) {
+                const loc = locationMap.find(loc => loc.id === toId);
+                if (!loc) continue;
+
+                const nodeData = { id: toId, ...loc };
+                if (fixedPositions[toId]) {
+                    nodeData.fx = fixedPositions[toId].x;
+                    nodeData.fy = fixedPositions[toId].y;
+                }
+                nodesMap.set(toId, nodeData);
+                nodes.push(nodeData);
+                addedNodes = true;
             }
 
-            return node;
-        });
+            // Add link
+            if (!linksSet.has(key1) && !linksSet.has(key2)) {
+                linksSet.add(key1);
+                const sourceNode = nodesMap.get(fromId);
+                const targetNode = nodesMap.get(toId);
+
+                if (!sourceNode || !targetNode) continue;
+
+                links.push({
+                    source: sourceNode,
+                    target: targetNode,
+                    type: conn.type,
+                    timestamp: conn.timestamp
+                });
+                addedLinks = true;
+            }
+        }
+
+        console.log("Map updated", { nodesCount: nodes.length, linksCount: links.length });
+        if (addedNodes || addedLinks) {
+            calculateNodesSize(nodes);
+            prepareSimulationAttributes(nodes, links);
+            updateGraph(); // updates visuals
+        }
+    }
+
+    async function updateGraph(){
+        if (!simulation) {
+            simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links)
+                    .id(d => d.id)
+                    .distance(d => d.distance)
+                    .strength(d => d.strength))
+                .force("charge", d3.forceManyBody()
+                    .strength(d => d.chargeStrength))
+                .force("collision", d3.forceCollide()
+                    .radius(d => d.collisionRadius)
+                    .strength(0.5)
+)
+                .on("tick", ticked);
+        } else {
+            simulation.nodes(nodes);
+            simulation.force("link").links(links);
+            simulation.alpha(1).restart();
+        }
 
         // Clear previous contents
-        container.selectAll('*:not(defs)').remove();
+        const linkSel = linkLayer.selectAll("line")
+            .data(links, d => `${d.source}->${d.target}`);
+        const nodeSel = nodeLayer.selectAll("g.node")
+            .data(nodes, d => d.id);
 
-        // Create simulation
-        simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(50).strength(1.7))
-            .force("charge", d3.forceManyBody().strength(-200))
-            //.force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collision", d3.forceCollide()
-                .radius(d => Math.max(nodeSize.w, nodeSize.h) / 2 + 50)  // Add padding
-                .strength(0.4));
-
-        // Draw lines
-        const link = container.append("g")
-            .attr("stroke", "#999")
-            .attr("stroke-opacity", 0.6)
-            .selectAll("line")
-            .data(links)
-            .enter().append("line")
-            .attr("stroke-width", 2)
-            //.attr("marker-start", "url(#arrow-start)")
-            //.attr("marker-end", "url(#arrow-end)");
-
-        // Draw rectangles
-        const node = container.append("g")
-            .selectAll("g")
-            .data(nodes)
-            .enter().append("g");
+        linkSel.join(
+            enter => enter.append("line")
+                .attr("stroke", "#999")
+                .attr("stroke-opacity", 0.6)
+                .attr("stroke-width", 2),
+            update => update,
+            exit => exit.remove()
+        );
 
 
-        node.append("rect")
-            .attr("width", nodeSize.w)
-            .attr("height", nodeSize.h)
+        const nodeEnter = nodeSel.enter().append("g")
+            .attr("class", "node")
+            .call(drag);
+
+        nodeEnter.append("rect")
+            .attr("width", d => d.width)
+            .attr("height", d => d.height)
             .attr("rx", 10)
             .attr("ry", 10)
             .attr("fill", d => {
-                const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8)); // clamp tier to [0, 8]
+                const tier = Math.max(0, Math.min((d.tier ?? 0) - 1, 8));
                 const factor = tier / 8;
 
-                switch (d.type) {
-                    case "TNL": // Ava Roads
-                        return interpolateColor([180, 200, 255], [80, 120, 220], factor);
-                    case "Smug":
-                        return interpolateColor([204, 204, 204], [153, 153, 153], factor);
-                    case "DNG":
-                        return interpolateColor([166, 166, 166], [117, 117, 117], factor);
-                    case "PSG":
-                        return interpolateColor([175, 175, 200], [175, 175, 200], factor);
-                    default: // Overworld
-                        return interpolateColor([209, 255, 209], [50, 140, 80], factor);
-                }
-            })
-            .attr("stroke", d => (d.tier === 8 ? "#bb2222" : "#333"))
-            .attr("stroke-width", d => (d.tier === 8 ? 2 : 1));
+                const biomeColors = {
+                    mountains: [250, 250, 250],   // white-gray
+                    swamp:     [144, 173, 168],   // swampy
+                    steppe:    [235, 235, 42],   // yellow
+                    highlands: [180, 180, 180],   // gray
+                    forest:    [90, 195, 90],   // green
+                    other:     [203, 203, 203]        // fallback
+                };
 
-        node.append("text")
-            .attr("x", nodeSize.w / 2)
-            .attr("y", nodeSize.h / 2 + 4)
+                const redTint = [15, 15, 0]; // tint added to tier 8
+                let finalColor;
+
+                let base;
+                let color;
+                switch (d.type) {
+                    case "city" : return "rgb(233, 233, 233)";
+                    case "world" : 
+                        base = biomeColors[d.biome] || biomeColors.other;
+                        color = base;
+                        //if (d.tier === 8) return "rgb(185, 170, 170)";
+                        //const color = interpolateColor(base, base.map(c => c * 0.8), factor);
+                        finalColor = d.tier === 8 ? color.map((c, i) => c + redTint[i]): color;
+                        break;
+                    case "world_boss" : 
+                        base = biomeColors[d.biome] || biomeColors.other;
+                        //if (d.tier === 8) return "rgb(185, 170, 170)";
+                        //const color = interpolateColor(base, base.map(c => c * 0.8), factor);
+                        color = base.map((c, i) => c * 0.9 + redTint[i]);
+                        finalColor = d.tier === 8 ? color.map((c, i) => c + redTint[i] * 1): color;
+                        //finalColor = interpolateColor([230, 245, 200], [200, 144, 134], factor);
+                        break;
+                    case "static_dungeon": 
+                        finalColor = interpolateColor([166, 166, 166], [117, 117, 117], factor);
+                        break;
+                    case "smuggler": 
+                        finalColor = interpolateColor([204, 204, 204], [153, 153, 153], factor);
+                        break;
+                    case "passage": return "rgb(175, 175, 200)";
+                    case "avalon": 
+                        finalColor = interpolateColor([180, 200, 255], [80, 120, 220], factor);
+                        break;
+                    default: return "rgb(255, 0, 0)";
+                }
+                return `rgb(${finalColor[0]}, ${finalColor[1]}, ${finalColor[2]})`;
+            })
+            .attr("stroke", 
+                d => d.type === "world_boss" || 
+                    (d.type === "avalon" && d.tier === 8) ? 
+                    "#bb2222" : "#333")
+            .attr("stroke-width", 
+                d => d.type === "world_boss" || 
+                    (d.type === "avalon" && d.tier === 8) ? 4 : 1);
+
+        nodeEnter.append("text")
+            .attr("x", d => d.width / 2)
+            .attr("y", d => d.height / 2 + 4)
             .attr("text-anchor", "middle")
             .text(d => `${d.name} T${d.tier ?? 0}`);
 
-
-        // for (let i = 0; i < 500; ++i) simulation.tick();
-        // simulation.stop();
-        simulation.on("tick", () => {  
-            applyFixedAttraction(nodes);
-
-            node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
-                link
-                    .attr("x1", d => d.source.x)
-                    .attr("y1", d => d.source.y)
-                    .attr("x2", d => d.target.x)
-                    .attr("y2", d => d.target.y);
-        });
-
-        node.attr("transform", d => `translate(${d.x - nodeSize.w / 2}, ${d.y - nodeSize.h / 2})`);
-        node.call(drag);
-        // Simulation tick updates positions
-        // link
-        //     .attr("x1", d => d.source.x)
-        //     .attr("y1", d => d.source.y)
-        //     .attr("x2", d => d.target.x)
-        //     .attr("y2", d => d.target.y);
+        nodeSel.exit().remove();
     }
 
+    function ticked() {
+        nodeLayer.selectAll("g.node")
+            .attr("transform", d => `translate(${d.x - d.width / 2}, ${d.y - d.height / 2})`);
+
+        linkLayer.selectAll("line")
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+    }
+
+    function calculateNodesSize(nodes) {
+        nodes.forEach(d => {
+            const baseWidth = width / 5.5;
+            const baseHeight = height / 18;
+
+            if (d.tier === 8 && 
+                (d.type === "world_boss" || d.type === "world" || d.type === "avalon"))  {
+                    d.width = baseWidth * 0.95;
+                    d.height = baseWidth * 0.95;
+            }
+            else if (d.type === "world" && d.tier === 7) {
+                    d.width = baseWidth * 0.75;
+                    d.height = baseWidth * 0.75;
+            }
+            else {
+                d.width = baseWidth;
+                d.height = baseHeight;
+            }
+        });
+    }
+    function prepareSimulationAttributes(nodes, links) {
+        for (const node of nodes) {
+            const halfMaxSize = Math.max(node.width, node.height) / 2;
+            const chargeMap = {
+                city: 100,
+                world: -700,
+                world_boss: -150,
+                static_dungeon: -50,
+                smuggler: -100,
+                passage: -50,
+                avalon: -150,
+                other: -500
+            };
+
+            // Collision Radius by type
+            const radiusMap = {
+                city: () => node.height,
+                world: () => node.tier === 8 ? halfMaxSize * 2: halfMaxSize * 1 + (node.tier ?? 0) / 10,
+                world_boss: () => halfMaxSize,
+                static_dungeon: () => halfMaxSize * 0.8,
+                smuggler: () => halfMaxSize,
+                passage: () => halfMaxSize,
+                avalon: () => halfMaxSize * 1.15,
+                other: () => halfMaxSize
+            };
+
+            node.chargeStrength = chargeMap[node.type] ?? chargeMap.other;
+            node.collisionRadius = (radiusMap[node.type] ?? radiusMap.other)();
+            node.collisionStrength = 0.5;
+        }
+
+        for (const link of links) {
+            const sourceType = nodes.find(n => n.id === link.source.id).type;
+            const targetType = nodes.find(n => n.id === link.target.id).type;
+
+            const typeCombo = [sourceType, targetType].sort().join("-");
+
+            link.distance = {
+                "static_dungeon-static_dungeon": 0,
+                "static_dungeon-world": 0,
+                "avalon-avalon": 50,
+                "avalon-world": 200,
+                "avalon-world": 0,
+                "world-world": 0,
+                "city-city": 100,
+                "city-world": -100
+            }[typeCombo] || 50;
+
+            link.strength = {
+                "static_dungeon-static_dungeon": 1.8,
+                "static_dungeon-world": 0.5,
+                "avalon-avalon": 1.0,
+                "avalon-world": 0.5,
+                "avalon-world": 1,
+                "world-world": 2,
+                "city-city": 0.5,
+                "city-world": 1.7
+            }[typeCombo] || 1.0;
+        }
+    }
     function applyFixedAttraction(nodes) {
         const strength = 0.03;
         nodes.forEach(d => {
@@ -278,38 +598,14 @@
         });
     }
 
-    function adjustEdge(source, target) {
-        const sourceCenterX = source.x + nodeSize.w / 2;
-        const sourceCenterY = source.y + nodeSize.h / 2;
-        const targetCenterX = target.x + nodeSize.w / 2;
-        const targetCenterY = target.y + nodeSize.h / 2;
-
-        const dx = targetCenterX - sourceCenterX;
-        const dy = targetCenterY - sourceCenterY;
-
-        const dirX = dx === 0 ? 0 : dx > 0 ? 1 : -1;
-        const dirY = dy === 0 ? 0 : dy > 0 ? 1 : -1;
-
-        const offsetX = (nodeSize.w / 2) * dirX;
-        const offsetY = (nodeSize.h / 2) * dirY;
-
-        return {
-            x1: sourceCenterX - offsetX,
-            y1: sourceCenterY + offsetY,
-            x2: targetCenterX - offsetX,
-            y2: targetCenterY + offsetY
-        };
-    }
-
-    function interpolateColor(fromColor, toColor, factor) {
-        const r = Math.round(fromColor[0] + (toColor[0] - fromColor[0]) * factor);
-        const g = Math.round(fromColor[1] + (toColor[1] - fromColor[1]) * factor);
-        const b = Math.round(fromColor[2] + (toColor[2] - fromColor[2]) * factor);
-        return `rgb(${r}, ${g}, ${b})`;
+    function interpolateColor(fromRGB, toRGB, t) {
+        return fromRGB.map((c, i) => Math.round(c + (toRGB[i] - c) * t));
     }
 
     updateMap();
-    setInterval(updateMap, 3000); // refresh every 2 seconds
+    setInterval(updateMap, 3000); // refresh every 3 seconds
+
+    animatePlayerMarker();
 </script>
 </body>
 </html>
